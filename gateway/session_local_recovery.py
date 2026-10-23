@@ -357,6 +357,44 @@ def local_receipt_ids(authority):
             'SELECT key FROM state_meta WHERE key LIKE ?', (POLICY_PREFIX + '%',))]
 
 
+async def recover_plain_local_session(authority, sid, rows, source):
+    """Mount and drain a desktop (LOCAL) session whose queued rows carry no native envelope.
+
+    ``recover_native_sessions`` refuses rows without ``native_text_v1``, route recovery refuses
+    LOCAL by design (receipts own them), and receipts can be spent or missing — the combination
+    left desktop chats with queued turns permanently unmountable after a restart: ``attach``
+    answered ``not_found`` and the backlog rotted (2026-10, local-a35e11b7). Mount from the row's
+    own route and settle dead-epoch unknowns ONLY when a queued turn is blocked behind them: an
+    unblocked unknown keeps the operator's Discard decision, but the session at least opens.
+    """
+    import logging
+    from gateway.session_authority import LiveSession
+    from gateway.session_contract import SessionRef
+    from hermes_state_runtime import RuntimeStoreError
+    if not any(row['status'] in ('queued', 'unknown') for row in rows):
+        raise RuntimeStoreError('not_found')
+    session_row = authority.db.get_session(sid)
+    route = (session_row or {}).get('session_key')
+    if not route:
+        raise RuntimeStoreError('not_found')  # nothing to mount it under: the honest not_found
+    authority._require_admission_open()
+    authority.sessions.setdefault(sid, LiveSession(source, route))
+    ref = SessionRef(authority.profile_id, sid)
+    if not any(row['status'] == 'queued' for row in rows):
+        return 'paused'  # mountable; the operator's Discard decision stays theirs
+    for row in rows:
+        if row['status'] != 'unknown':
+            continue
+        try:
+            await authority.resolve_unknown_as_owner(ref, row['admission_id'], row['generation'])
+        except RuntimeStoreError as exc:
+            logging.getLogger(__name__).warning(
+                'Startup of local session %s left unknown turn %s paused: %s', sid, row['admission_id'], exc.reason)
+            return 'paused'
+    authority._schedule(ref)
+    return 'ready_local'
+
+
 def recover_local_sessions(authority, *, schedule=False):
     for sid in local_receipt_ids(authority):
         try:

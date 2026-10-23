@@ -75,10 +75,10 @@ async def test_orphaned_admission_settlement_releases_fifo(tmp_path, monkeypatch
         assert head.admission_id not in authority.pending_results
         assert get_session_admission(db, admission_id=follower.admission_id)['status'] == 'terminal'
         completes = [f for f in frames if f.get('params', {}).get('type') == 'message.complete']
-        head_frame = [f for f in completes if f['params'].get('text') == 'orphaned-head done']
+        head_frame = [f for f in completes if f['params'].get('payload', {}).get('text') == 'orphaned-head done']
         assert head_frame, f'no terminal frame for the orphaned turn: {frames!r}'
         # An honest failure notice: the answer is shown, but nothing durable committed it.
-        assert head_frame[0]['params']['outcome'] == 'failed'
+        assert head_frame[0]['params']['payload']['outcome'] == 'failed'
 
 
 @pytest.mark.asyncio

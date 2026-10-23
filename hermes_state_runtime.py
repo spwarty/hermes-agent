@@ -70,11 +70,18 @@ def _session(conn, session_id):
     return row
 
 
-def _admission(conn, admission_id):
+def try_admission(conn, admission_id):
+    """The admission row, its retired tombstone, or ``None`` — for callers that must tolerate a
+    receipt deleted under a live claim (settlement of an orphaned turn) rather than refuse."""
     row = conn.execute('SELECT * FROM session_admissions WHERE admission_id=?', (admission_id,)).fetchone()
     if row is None:
         from hermes_state_terminal import terminal_admission
         row = terminal_admission(conn, admission_id)
+    return row
+
+
+def _admission(conn, admission_id):
+    row = try_admission(conn, admission_id)
     if row is None:
         raise RuntimeStoreError('not_found')
     return row

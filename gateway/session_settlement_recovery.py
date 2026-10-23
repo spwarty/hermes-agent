@@ -3,7 +3,7 @@ import asyncio
 import logging
 import sqlite3
 
-from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, settle_steer_transfers
+from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, settle_steer_transfers, try_admission
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +13,11 @@ def _mark_unknown(authority, row):
 
     def write(conn):
         _epoch(conn, authority.epoch)
-        current = _admission(conn, row['admission_id'])
+        current = try_admission(conn, row['admission_id'])
+        if current is None:
+            # The receipt vanished under us: no row to fence, and a stamp on nothing could never
+            # be resolved. Report it; the drain releases the claim instead of parking the session.
+            return 'gone'
         if current['owner_epoch'] != authority.epoch or current['generation'] != row['generation']:
             raise RuntimeStoreError('stale_generation')
         if current['status'] in {'terminal', 'unknown'}:
@@ -184,9 +188,23 @@ def commit_and_publish(authority, live, ref, row, response, outcome, captured, s
         live.settling[admission_id] = row
     transfers = _transfers(authority, live, row)
     try:
-        settlement['settled'], settlement['response'] = finish_result(
-            authority.db, epoch=authority.epoch, row=row, response=response, outcome=outcome,
-            result=captured, prepared=prepared, transfers=transfers)
+        try:
+            settlement['settled'], settlement['response'] = finish_result(
+                authority.db, epoch=authority.epoch, row=row, response=response, outcome=outcome,
+                result=captured, prepared=prepared, transfers=transfers)
+        except RuntimeStoreError as exc:
+            if exc.reason not in ('admission_gone', 'not_found'):
+                raise
+            # The receipt vanished under this claim (a retirement raced the turn, or its tombstone
+            # was swept past retention): there is nothing to settle and an unknown stamp on a
+            # missing row could never be resolved. Release the live claim with an honest failed
+            # completion so viewers unstick and the FIFO moves — never inventing a durable receipt.
+            logger.warning('Settlement of admission %s found no receipt row; releasing the '
+                           'orphaned claim without a durable settle', admission_id)
+            settlement['settled'] = {'status': 'terminal', 'outcome': 'failed',
+                                     'owner_epoch': authority.epoch, 'generation': row['generation'],
+                                     'admission_id': admission_id, 'admission_gone': True}
+            settlement['response'] = response
         with live.event_stream.lock:
             live.settling.pop(admission_id, None)
             _publish_completion(authority, live, ref, row, settlement['settled'], settlement['response'], captured)

@@ -1257,6 +1257,15 @@ class SessionAuthority:
                         return
                     # Discard can race the off-loop recovery stamp; its terminal decision wins.
                     current = get_session_admission(self.db, admission_id=admission_id)
+                    if current is None:
+                        # The receipt vanished under the recovery stamp (orphaned claim): an
+                        # unknown turn whose row is gone can never be resolved, so do not pause
+                        # the FIFO on it. Release the waiter with the refusal, as an operator
+                        # discard of this admission does, and keep draining.
+                        waiter = self.waiters.pop(admission_id, None)
+                        if waiter is not None and not waiter.done():
+                            waiter.set_exception(RuntimeStoreError('unknown_execution'))
+                        continue
                     status = current['status']
                     if status == 'unknown':
                         from gateway.session_ingress import retain_unsettled_delivery

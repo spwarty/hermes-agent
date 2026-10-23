@@ -1,7 +1,7 @@
 """Exact execution results commit with settlement, before delivery/publication."""
 from contextvars import ContextVar
 
-from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, settle_session_input
+from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, settle_session_input, try_admission
 
 execution_result: ContextVar[dict | None] = ContextVar("execution_result", default=None)
 from hermes_state_terminal import RESULT_PREFIX as _RESULT_PREFIX, load_result
@@ -73,7 +73,10 @@ def finish_result(db, *, epoch, row, response, outcome, result=None, prepared=No
     """
     with db._read_ctx() as conn:
         _epoch(conn, epoch)
-        current = _admission(conn, row['admission_id'])
+        current = try_admission(conn, row['admission_id'])
+        if current is None:
+            raise RuntimeStoreError('admission_gone', field='admission_id',
+                                    detail='admission row and tombstone absent (orphaned claim)')
         if current['owner_epoch'] != epoch or current['generation'] != row['generation']:
             raise RuntimeStoreError('stale_generation')
         if current['status'] == 'terminal':

@@ -600,7 +600,12 @@ class SessionAuthority:
                 rows = list_session_admissions(self.db, session_id=sid, pending_only=False)
                 native = [row for row in rows if 'native_text_v1' in row['payload']]
                 if not native:
-                    raise RuntimeStoreError('not_found')
+                    # Desktop (LOCAL) chats queue plain-text rows; receipts and route recovery
+                    # both refuse them, so without this they stayed unmountable — not_found on
+                    # every open — forever after a restart.
+                    from gateway.session_local_recovery import recover_plain_local_session
+                    results[sid] = await recover_plain_local_session(self, sid, rows, available_source)
+                    continue
                 target = self.physical_target(SessionRef(self.profile_id, sid))
                 source, route = await check_native_route(self.runner, native[-1]['payload'], target,
                                                     available_source, adapter)

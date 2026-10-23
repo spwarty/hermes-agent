@@ -33,10 +33,26 @@ def _local_row(db):
 
 
 def _stamp_unknown(db, admission_id):
-    """The hard-killed-owner state: claimed turn recovered as unknown (dead epoch)."""
+    """The hard-killed-owner state: a CLAIMED turn (int generation, per resolve's guard)
+    recovered as unknown under a dead owner epoch."""
     def write(conn):
-        conn.execute("UPDATE session_admissions SET status='unknown' WHERE admission_id=?", (admission_id,))
+        conn.execute("UPDATE session_admissions SET status='unknown', generation=1, owner_epoch=1 "
+                     "WHERE admission_id=?", (admission_id,))
     db._execute_write(write)
+
+
+async def _settled(db, admission_id, timeout=5):
+    """The row's terminal status, polling through the tracked-worker write path that lands
+    settlement just after the drain task returns (deferred settle, #94736 in-flight writes)."""
+    import time
+    deadline = time.time() + timeout
+    row = None
+    while time.time() < deadline:
+        row = get_session_admission(db, admission_id=admission_id)
+        if row and row['status'] == 'terminal':
+            return row
+        await asyncio.sleep(0.05)
+    return row
 
 
 def _bindings(authority):
@@ -72,7 +88,8 @@ async def test_plain_local_queued_drains_after_restart_without_receipts(tmp_path
         assert task is not None
         await asyncio.wait_for(task, 10)
         assert executed == ['plain-queued']
-        assert get_session_admission(db, admission_id=receipt.admission_id)['status'] == 'terminal'
+        row = await _settled(db, receipt.admission_id)
+        assert row and row['status'] == 'terminal', row
 
 
 @pytest.mark.asyncio
@@ -96,10 +113,11 @@ async def test_dead_epoch_unknown_settles_when_a_queued_turn_is_blocked(tmp_path
         await asyncio.wait_for(task, 10)
         # The dead turn settles terminal without executing; the follower runs exactly once.
         assert executed == ['blocked-follower'], executed
-        head_row = get_session_admission(db, admission_id=head.admission_id)
-        assert head_row['status'] == 'terminal', head_row
+        head_row = await _settled(db, head.admission_id)
+        assert head_row and head_row['status'] == 'terminal', head_row
         assert head_row['outcome'] in ('interrupted', 'discarded'), head_row
-        assert get_session_admission(db, admission_id=follower.admission_id)['status'] == 'terminal'
+        follower_row = await _settled(db, follower.admission_id)
+        assert follower_row and follower_row['status'] == 'terminal', follower_row
 
 
 @pytest.mark.asyncio

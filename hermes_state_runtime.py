@@ -5,6 +5,7 @@ SessionDB transaction owner, including its inode guard and SQLite retry policy.
 """
 import heapq
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -60,9 +61,21 @@ def _json(value):
     if not isinstance(value, dict):
         raise RuntimeStoreError('invalid_params')
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
     except (TypeError, ValueError, UnicodeError) as exc:
         raise RuntimeStoreError('invalid_params') from exc
+    # A lone UTF-16 surrogate (broken terminal or paste text) survives json.dumps with
+    # ensure_ascii=False but cannot be stored in the store's UTF-8 TEXT columns; without
+    # this, one such character wedges the receipt write — and with it the session FIFO
+    # (both discard and delete) — behind the turn it arrived with. Replace it with U+FFFD:
+    # errors='replace' is a no-op here on these runtimes (it yields '?'), so name the
+    # replacement explicitly for identical behavior on every platform.
+    if _LONE_SURROGATE.search(text):
+        text = _LONE_SURROGATE.sub('\ufffd', text)
+    return text
+
+
+_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
 
 
 def _epoch(conn, epoch):
